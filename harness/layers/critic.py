@@ -70,8 +70,16 @@ Xem `harness/middleware.py` để biết thứ tự các hook.
 
 from __future__ import annotations
 
-from harness.layers._text import doc_lines, norm, on_one_line, retrieved, trimmed
+import re
+import unicodedata
+
 from harness.middleware import Middleware
+
+_WS_RE = re.compile(r"\s+")
+
+#: Ký tự mô hình thật hay bọc quanh một trích dẫn. Cắt chúng ở HAI ĐẦU vẫn
+#: là cắt bớt (substring), nên không mất provenance.
+_EDGE_CHARS = " \t\r\n.,;:!?\"'“”‘’*`_-–—()[]"
 
 #: Chỗ mô hình dán hai nửa câu của hai nguồn mâu thuẫn (trường hợp (c)).
 SPLICE_JOINERS = (" và ", "; ", " nhưng ")
@@ -80,6 +88,32 @@ ABSTAIN_ANSWER = (
     "Không đủ căn cứ: các tài liệu đã đọc không chứa bằng chứng trích dẫn "
     "được cho câu hỏi này."
 )
+
+
+def norm(text) -> str:
+    """Chuẩn hoá giống `arena.scorer._norm` — chỉ để SO SÁNH, không ghi ngược vào claim."""
+    if not isinstance(text, str):
+        return ""
+    return _WS_RE.sub(" ", unicodedata.normalize("NFC", text).casefold()).strip()
+
+
+def doc_lines(doc) -> tuple:
+    """Các dòng đã chuẩn hoá của một tài liệu (một trích dẫn nằm trên một dòng)."""
+    return tuple(line for line in (norm(raw) for raw in doc.body.splitlines()) if line)
+
+
+def on_one_line(lines, normalised: str) -> bool:
+    return bool(normalised) and any(normalised in line for line in lines)
+
+
+def retrieved(doc, seen: str) -> bool:
+    """Agent đã thấy tài liệu: fetch nguyên vẹn, hoặc doc_id có trong kết quả search."""
+    return norm(doc.body) in seen or doc.doc_id.casefold() in seen
+
+
+def trimmed(text: str) -> str:
+    """Bỏ dấu câu / định dạng ở hai đầu — một substring của chính `text`."""
+    return text.strip(_EDGE_CHARS)
 
 
 class Critic(Middleware):

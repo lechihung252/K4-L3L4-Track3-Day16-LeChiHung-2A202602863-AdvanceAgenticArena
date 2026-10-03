@@ -59,8 +59,38 @@ Xem `harness/middleware.py` để biết thứ tự các hook.
 
 from __future__ import annotations
 
-from harness.layers._text import doc_lines, fetched_whole, norm, on_one_line, retrieved
+import re
+import unicodedata
+
 from harness.middleware import Middleware
+
+_WS_RE = re.compile(r"\s+")
+
+
+def norm(text) -> str:
+    """Chuẩn hoá giống `arena.scorer._norm` — chỉ để SO SÁNH, không ghi ngược vào claim."""
+    if not isinstance(text, str):
+        return ""
+    return _WS_RE.sub(" ", unicodedata.normalize("NFC", text).casefold()).strip()
+
+
+def doc_lines(doc) -> tuple:
+    """Các dòng đã chuẩn hoá của một tài liệu (một trích dẫn nằm trên một dòng)."""
+    return tuple(line for line in (norm(raw) for raw in doc.body.splitlines()) if line)
+
+
+def on_one_line(lines, normalised: str) -> bool:
+    return bool(normalised) and any(normalised in line for line in lines)
+
+
+def fetched_whole(doc, seen: str) -> bool:
+    """Thân tài liệu về NGUYÊN VẸN từ một lần fetch sạch."""
+    return norm(doc.body) in seen
+
+
+def retrieved(doc, seen: str) -> bool:
+    """Agent đã thấy tài liệu: fetch nguyên vẹn, hoặc doc_id có trong kết quả search."""
+    return fetched_whole(doc, seen) or doc.doc_id.casefold() in seen
 
 
 class CitationChecker(Middleware):
