@@ -59,6 +59,7 @@ Xem `harness/middleware.py` để biết thứ tự các hook.
 
 from __future__ import annotations
 
+from harness.layers._text import doc_lines, fetched_whole, norm, on_one_line, retrieved
 from harness.middleware import Middleware
 
 
@@ -68,16 +69,29 @@ class CitationChecker(Middleware):
     name = "citation_checker"
 
     def after_agent(self, ctx, report):
-        # TODO (§11): khoảng 10-25 dòng.
-        #  1. Lấy report["claims"]; bỏ qua nếu rỗng hoặc ctx.corpus là None.
-        #  2. Với mỗi claim, gọi ctx.corpus.get(claim["doc_id"]).
-        #     Nếu tài liệu tồn tại VÀ claim["text"] khớp NGUYÊN VĂN một
-        #     DÒNG trong body của nó (không phải chỉ "nằm trong body")
-        #     -> trích dẫn đã đúng, giữ nguyên claim.
-        #  3. Nếu không: tìm trong ctx.corpus.docs tài liệu đầu tiên thoả
-        #     doc.body in ctx.observed_text  và  claim["text"] khớp
-        #     nguyên văn một DÒNG của doc.body -> đó là nguồn thật.
-        #     Đổi doc_id sang nó, GIỮ NGUYÊN text.
-        #  4. Không tìm được nguồn nào -> để `critic` xử lý, đừng bịa doc_id.
-        #  5. Cập nhật report["citations"] = danh sách doc_id đã sắp xếp.
-        return report  # <- mặc định KHÔNG LÀM GÌ: agent vẫn chạy được
+        claims = report.get("claims")
+        if not isinstance(claims, list) or not claims or ctx.corpus is None:
+            return report
+        seen = norm(ctx.observed_text)
+        seen_docs = [doc for doc in ctx.corpus.docs if retrieved(doc, seen)]
+        # Ưu tiên tài liệu đã fetch nguyên vẹn, rồi mới tới tài liệu chỉ thấy qua search.
+        seen_docs.sort(key=lambda doc: not fetched_whole(doc, seen))
+        lines = {doc.doc_id: doc_lines(doc) for doc in seen_docs}
+
+        moved = 0
+        for claim in claims:
+            if not isinstance(claim, dict) or not isinstance(claim.get("text"), str):
+                continue
+            text = norm(claim["text"])
+            if on_one_line(lines.get(claim.get("doc_id"), ()), text):
+                continue  # đã trích đúng một tài liệu đã đọc
+            source = next((d for d, ls in lines.items() if on_one_line(ls, text)), None)
+            if source is not None:
+                claim["doc_id"] = source  # đổi nguồn, GIỮ NGUYÊN text
+                moved += 1
+
+        ctx.state["citations_moved"] = moved
+        report["citations"] = sorted(
+            {c["doc_id"] for c in claims if isinstance(c, dict) and c.get("doc_id")}
+        )
+        return report

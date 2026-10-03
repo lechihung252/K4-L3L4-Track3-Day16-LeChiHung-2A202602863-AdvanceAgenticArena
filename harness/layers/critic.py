@@ -70,7 +70,16 @@ Xem `harness/middleware.py` để biết thứ tự các hook.
 
 from __future__ import annotations
 
+from harness.layers._text import doc_lines, norm, on_one_line, retrieved, trimmed
 from harness.middleware import Middleware
+
+#: Chỗ mô hình dán hai nửa câu của hai nguồn mâu thuẫn (trường hợp (c)).
+SPLICE_JOINERS = (" và ", "; ", " nhưng ")
+
+ABSTAIN_ANSWER = (
+    "Không đủ căn cứ: các tài liệu đã đọc không chứa bằng chứng trích dẫn "
+    "được cho câu hỏi này."
+)
 
 
 class Critic(Middleware):
@@ -79,16 +88,52 @@ class Critic(Middleware):
     name = "critic"
 
     def after_agent(self, ctx, report):
-        # TODO (§2): khoảng 10-25 dòng.
-        #  1. Lấy report["claims"]; nếu rỗng hoặc không phải list thì thôi.
-        #  2. Với mỗi claim: nếu claim["text"] có trong ctx.observed_text
-        #     -> giữ nguyên (KHÔNG sửa chữ).
-        #  3. Nếu không: thử tách câu ghép (trường hợp (c) ở docstring).
-        #     Tách được -> giữ cả hai nửa, mỗi nửa gắn doc_id của tài liệu
-        #     thật sự chứa nó, và đặt report["abstain"] = True.
-        #  4. Không tách được -> đây là bịa: bỏ claim đi.
-        #  5. Nếu không còn claim nào: report["abstain"] = True,
-        #     claims = [], citations = [], và viết lại "answer" nói rõ là
-        #     không đủ căn cứ.
-        #  6. Cập nhật report["citations"] cho khớp với claims còn lại.
-        return report  # <- mặc định KHÔNG LÀM GÌ: agent vẫn chạy được
+        claims = report.get("claims")
+        if not isinstance(claims, list):
+            return report
+        seen = norm(ctx.observed_text)
+        docs = ctx.corpus.docs if ctx.corpus is not None else []
+        lines = {doc.doc_id: doc_lines(doc) for doc in docs if retrieved(doc, seen)}
+
+        def source(text):
+            """doc_id tài liệu đã đọc có MỘT DÒNG chứa `text`, hoặc None."""
+            n = norm(text)
+            if len(n) < 12 or n not in seen:
+                return None
+            return next((d for d, ls in lines.items() if on_one_line(ls, n)), None)
+
+        kept, spliced = [], False
+        for claim in claims:
+            text = claim.get("text") if isinstance(claim, dict) else None
+            if not isinstance(text, str):
+                continue
+            if source(text):
+                kept.append(claim)
+            elif source(trimmed(text)):
+                kept.append({**claim, "text": trimmed(text)})  # cắt bớt, không sửa
+            else:
+                halves = self._split(text, source)
+                kept.extend(halves)
+                spliced = spliced or bool(halves)
+
+        ctx.state["critic_dropped"] = len(claims) - len(kept)
+        report["claims"] = kept
+        report["citations"] = sorted({c["doc_id"] for c in kept if c.get("doc_id")})
+        if spliced or not kept:
+            report["abstain"] = True
+        if not kept:
+            report["answer"] = ABSTAIN_ANSWER
+        return report
+
+    @staticmethod
+    def _split(text, source):
+        """Tách câu ghép tại chỗ dán: hai nửa phải thuộc HAI tài liệu khác nhau."""
+        for joiner in SPLICE_JOINERS:
+            start = text.find(joiner)
+            while start != -1:
+                left, right = trimmed(text[:start]), trimmed(text[start + len(joiner):])
+                a, b = source(left), source(right)
+                if a and b and a != b:
+                    return [{"text": left, "doc_id": a}, {"text": right, "doc_id": b}]
+                start = text.find(joiner, start + 1)
+        return []
